@@ -1,0 +1,11 @@
+id	vid	rsid	aaf	logBeta
+Frob	1:100:A:G	rs100	0.6	-2.5
+Frob	1:101:T:C	rs101	0.55	-2
+Frob	1:102:C:T	rs102	0.95	1
+Frob	1:103:A:C	rs103	0.05	3
+Frob	1:104:G:A	rs104	0.45	2
+Frob	OFFSET	NA	NA	-1
+Zest	1:104:G:A	rs104	0.45	1
+Zest	X:200:C:T	rs200	0.55	-1
+Zest	Y:300:A:G	rs300	0.7	2
+Zest	OFFSET	NA	NA	1
