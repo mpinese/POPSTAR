@@ -187,7 +187,7 @@ proc generateNullModel(model: Model, dosages: Dosages, seed: int): Model =
       # TODO: Consider sampling only within xsomes.
       let
         afbin = dosages.afbins[dosages.vid2idx[vid]]
-        new_vid_idx = dosages.afbin2idx[coef.afbin][random(dosages.afbin2idx[afbin].len)]
+        new_vid_idx = dosages.afbin2idx[afbin][random(dosages.afbin2idx[afbin].len)]
         new_vid = dosages.vids[new_vid_idx]
       result.coefs[new_vid] = (af:dosages.afs[new_vid_idx], afbin:afbin, coef:coef.coef)
     else:
