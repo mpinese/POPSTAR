@@ -152,14 +152,15 @@ export_rebased_scores = function(assoc.rebased, output_path)
 {
     offsets = assoc.rebased$offsets
     coefficients = assoc.rebased$rebased
+    coefficients$vid = paste(coefficients$chrom, coefficients$pos, coefficients$ref, coefficients$alt, sep = ":")
 
-    offset_df = data.frame(id = names(offsets), rsid = "OFFSET", chrom = NA, pos = NA, ref = NA, alt = NA, aaf = NA, logBeta = offsets)
+    offset_df = data.frame(id = names(offsets), rsid = "OFFSET", chrom = NA, pos = NA, ref = NA, alt = NA, aaf = NA, logBeta = offsets, vid = NA)
     offset_df = offset_df[offset_df$id %in% unique(coefficients$id),]
 
     augmented_coefficients = rbind(coefficients, offset_df)
     augmented_coefficients = augmented_coefficients[order(augmented_coefficients$id, augmented_coefficients$chrom, augmented_coefficients$pos),]
 
-    write.table(augmented_coefficients, output_path, sep = "\t", quote = FALSE, row.names = FALSE, col.names = TRUE)
+    write.table(augmented_coefficients[,c("id", "vid", "rsid", "aaf", "logBeta")], output_path, sep = "\t", quote = FALSE, row.names = FALSE, col.names = TRUE)
 }
 
 

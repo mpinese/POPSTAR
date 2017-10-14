@@ -9,6 +9,20 @@ import tables
 const VERSION = "0.0.2, 12 Oct 2017"
 const AUTHOR = "Mark Pinese <m.pinese@garvan.org.au>"
 
+# TODO: Add warning somewhere for AF mismatch
+
+# TODO: Special rules for resampling:
+#   * Sampling should stay within xsome "class" (classes: X, Y, MT, autosomes)
+#   * Two choices of AF: dosages (empirical) or model
+#   * Special treatment of missing loci (in model but not in dosages).  
+#     These should *not* be resampled, but rather removed and added to offset.
+#     One hacky way to achieve this is to change the missing locus ID to an
+#     ID which is definitely not in the dosages data.
+#   * Try and do it without replacement
+
+# TODO: optimizations to test:
+#   * Critbit table for vid2idx
+#   * memfile for reading dosages
 
 type
   Dosages = tuple[
@@ -107,16 +121,16 @@ proc loadModels(path: string, n_afbins: int): Models =
     let
       fields = line.strip(leading=false).split(sep="\t")
       model_id = fields[0]
-      rsid = fields[1]
-      coef = fields[7].parseFloat
+      vid = fields[1]
+      rsid = fields[2]
+      coef = fields[4].parseFloat
 
-    if rsid == "OFFSET":
+    if vid == "OFFSET":
       result[model_id].offset = coef
       continue
 
     let
-      vid = fields[2] & ":" & fields[3] & ":" & fields[4] & ":" & fields[5]
-      af = fields[6].parseFloat
+      af = fields[3].parseFloat
       afbin = min(n_afbins - 1, floor(af * n_afbins.float).int)
     if not result.hasKey(model_id):
       result[model_id] = (id:model_id, offset:0.0, coefs:initTable[string, VarCoef]())
@@ -138,24 +152,20 @@ proc calcValues(model: Model, dosages: Dosages): seq[float] =
       let dosages_offset = dosages.vid2idx[vid]*n_samples
       for i in 0..<n_samples:
         if dosages.dosages[dosages_offset + i] == -1:
-          result[i] += 2.0*coef.af*coef.coef
+          # TODO: Can choose coef.af or dosages.afs here -- population bias vs genotype sampling bias.  GTS bias basically informative missingness.
+          # coef.af solution (population bias):
+          # result[i] += 2.0*coef.af*coef.coef
+          # dosages.afs solution (informative missingness issues):
+          result[i] += 2.0*dosages.afs[dosages.vid2idx[vid]]*coef.coef
         else:
           result[i] += float(dosages.dosages[dosages_offset + i])*coef.coef
     else:
       for i in 0..<n_samples:
+        # Note use of coef.af here -- no recourse to population freq
+        # because none is available.  Effect will be translation across
+        # all individuals, so relative differences will be preserved.
         result[i] += 2.0*coef.af*coef.coef
 
-
-# TODO: Add warning somewhere for AF mismatch
-
-# TODO: Special rules for resampling:
-#   * Sampling should stay within xsome "class" (classes: X, Y, MT, autosomes)
-#   * Two choices of AF: dosages (empirical) or model
-#   * Special treatment of missing loci (in model but not in dosages).  
-#     These should *not* be resampled, but rather removed and added to offset.
-#     One hacky way to achieve this is to change the missing locus ID to an
-#     ID which is definitely not in the dosages data.
-#   * Try and do it without replacement
 
 proc generateNullModel(model: Model, dosages: Dosages, seed: int): Model = 
   randomize(seed)
@@ -165,15 +175,25 @@ proc generateNullModel(model: Model, dosages: Dosages, seed: int): Model =
   result.coefs = initTable[string, VarCoef](initialSize=tables.rightSize(model.coefs.len))
 
   for vid, coef in model.coefs.pairs:
-    let
-      afbin = coef.afbin
+    if dosages.vid2idx.hasKey(vid):
+      # Select a new variant from dosages with matching allele frequency
+      # Alternative code for first line: afbin = coef.afbin
+
       # Note: sampling with replacement.  Shouldn't matter in almost all cases.
       # TODO: Ideally should not select variants in LD.  Difficult to implement though.
       # One rough approach could be to enforce a minimum distance.
       # This sampling with replacement *will* be an issue for WGP.
-      new_vid_idx = dosages.afbin2idx[coef.afbin][random(dosages.afbin2idx[afbin].len)]
-      new_vid = dosages.vids[new_vid_idx]
-    result.coefs[new_vid] = (af:dosages.afs[new_vid_idx], afbin:afbin, coef:coef.coef)
+
+      # TODO: Consider sampling only within xsomes.
+      let
+        afbin = dosages.afbins[dosages.vid2idx[vid]]
+        new_vid_idx = dosages.afbin2idx[coef.afbin][random(dosages.afbin2idx[afbin].len)]
+        new_vid = dosages.vids[new_vid_idx]
+      result.coefs[new_vid] = (af:dosages.afs[new_vid_idx], afbin:afbin, coef:coef.coef)
+    else:
+      # This locus was absent from dosages, so its null equivalent should
+      # be missing too.  Easily done by leaving it alone.
+      discard
 
 
 proc emitHeader(destination: File) = 

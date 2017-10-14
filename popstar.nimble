@@ -1,8 +1,8 @@
 # Package
 
 version       = "0.0.2"
-author        = "Mark Pinese"
-description   = "Polygenic/Oligogenic Phenotype Score Testing And Resampling"
+author        = "Mark Pinese <m.pinese@garvan.org.au>"
+description   = "Poly/Oligogenic Phenotype Score Testing And Resampling"
 license       = "MIT"
 
 
