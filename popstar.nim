@@ -1,4 +1,5 @@
 import math
+import memfiles
 import parseopt
 import random
 import sets
@@ -43,17 +44,21 @@ type
   Models = Table[string, Model]     # Keyed by id
 
 
-proc scanDosages(f: File): tuple[samples: seq[string], nvariants:int] = 
+proc scanDosages(f: MemFile): tuple[samples: seq[string], nvariants:int] = 
   # Count lines and columns in the file.  Check for sample uniqueness.
-  f.setFilePos(0)
-  let samples = f.readLine().strip(leading=false).split(sep="\t")[3..^1]
-  var sample_set = initSet[string](sets.rightSize(samples.len))
-  for sample in result.samples:
-    assert sample_set.containsOrIncl(sample) == false
-  var nvariants = 2
-  while not f.endOfFile:
-    discard f.readLine()
-    nvariants += 1
+  var
+    header_read = false
+    nvariants = 0
+    samples = @[""]
+  for slice in f.memSlices:
+    if header_read == false:
+      header_read = true
+      samples = ($slice).strip(leading=false).split(sep="\t")[3..^1]
+      var sample_set = initSet[string](sets.rightSize(samples.len))
+      for sample in result.samples:
+        assert sample_set.containsOrIncl(sample) == false
+    else:
+      nvariants += 1
   result = (samples, nvariants)
 
 
@@ -63,7 +68,7 @@ proc loadDosages(path: string, n_afbins=50): Dosages =
   # Scan the file to get sample IDs and variant count.
   # Verify sample ID uniqueness.
   let
-    f = open(path, mode=fmRead)
+    f = memfiles.open(path, mode=fmRead)
     (samples, nvariants) = scanDosages(f)
     nsamples = samples.len
   result.samples = samples
@@ -79,14 +84,17 @@ proc loadDosages(path: string, n_afbins=50): Dosages =
   stderr.write("  Reading...\n")
 
   # Read the data and verify vid uniqueness.
-  f.setFilePos(0)
-  discard f.readline()
-
   var 
     i = 0
     vid_set = initSet[string](sets.rightSize(nvariants))
+    header_read = false
+    buffer: TaintedString = ""
   
-  for line in f.lines:
+  for line in f.lines(buffer):
+    if header_read == false:
+      header_read = true
+      continue
+
     if i %% 10000 == 0:
       stderr.write("\r    " & $i & " / " & $nvariants & " variants")
     
@@ -115,14 +123,13 @@ proc loadDosages(path: string, n_afbins=50): Dosages =
 proc loadModels(path: string, n_afbins: int): Models = 
   stderr.write("Loading models from " & path & ", " & $n_afbins & " AF bins...")
   result = initTable[string, Model]()
-  let f = open(path, mode=fmRead)
+  let f = system.open(path, mode=fmRead)
   discard f.readLine()
   for line in f.lines:
     let
       fields = line.strip(leading=false).split(sep="\t")
       model_id = fields[0]
       vid = fields[1]
-      rsid = fields[2]
       coef = fields[4].parseFloat
 
     if vid == "OFFSET":
@@ -189,6 +196,10 @@ proc generateNullModel(model: Model, dosages: Dosages, seed: int): Model =
         afbin = dosages.afbins[dosages.vid2idx[vid]]
         new_vid_idx = dosages.afbin2idx[afbin][random(dosages.afbin2idx[afbin].len)]
         new_vid = dosages.vids[new_vid_idx]
+      # TODO: Add random sign flipping -- good idea?  Consider the implicit bias that's
+      # introduced by the "not reference" coding of the dosages.  Though OTOH this
+      # should also be accompanied by AF flipping... in which case will the effect be
+      # the same?  Think on this.
       result.coefs[new_vid] = (af:dosages.afs[new_vid_idx], afbin:afbin, coef:coef.coef)
     else:
       # This locus was absent from dosages, so its null equivalent should
@@ -289,7 +300,7 @@ proc main() =
     printUsage("ERROR: Model file path is required.")
     return
 
-  let output_file = if output_path == nil: stdout else: open(output_path, fmWrite)
+  let output_file = if output_path == nil: stdout else: system.open(output_path, fmWrite)
 
   calculationLoop(dosage_path, model_path, output_file, iters, bins, seed)
 
