@@ -216,8 +216,8 @@ proc emitValues(model: Model, dosages: Dosages, iter: int, seed: int, n_afbins: 
 
 
 proc calculationLoop(dosage_path: string, model_path: string, output_file: File, iters: int, n_afbins: int, seed: int) = 
-  let dosages = loadDosages(dosage_path, n_afbins)
   let models = loadModels(model_path, n_afbins)
+  let dosages = loadDosages(dosage_path, n_afbins)
 
   stderr.write("Preparing random seed vector...\n")
   randomize(seed)
