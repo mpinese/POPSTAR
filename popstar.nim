@@ -6,12 +6,13 @@ import sets
 import sequtils
 import strutils
 import tables
+import terminal
 
 const VERSION = "0.0.2, 12 Oct 2017"
 const AUTHOR = "Mark Pinese <m.pinese@garvan.org.au>"
 
-# TODO: Add warning somewhere for AF mismatch
 
+# TODO: Add warning somewhere for AF mismatch
 # TODO: Special rules for resampling:
 #   * Sampling should stay within xsome "class" (classes: X, Y, MT, autosomes)
 #   * Two choices of AF: dosages (empirical) or model
@@ -21,9 +22,6 @@ const AUTHOR = "Mark Pinese <m.pinese@garvan.org.au>"
 #     ID which is definitely not in the dosages data.
 #   * Try and do it without replacement
 
-# TODO: optimizations to test:
-#   * Critbit table for vid2idx
-#   * memfile for reading dosages
 
 type
   Dosages = tuple[
@@ -96,7 +94,8 @@ proc loadDosages(path: string, n_afbins=50): Dosages =
       continue
 
     if i %% 10000 == 0:
-      stderr.write("\r    " & $i & " / " & $nvariants & " variants")
+      stderr.eraseLine()
+      stderr.write("    " & $i & " / " & $nvariants & " variants")
     
     let
       fields = line.strip(leading=false).split(sep="\t")
@@ -232,7 +231,8 @@ proc calculationLoop(dosage_path: string, model_path: string, output_file: File,
   var j = 0
   for model_id, model in models.pairs:
     j += 1
-    stderr.write("\r  Model " & $j & " / " & $models.len & ": " & model_id)
+    stderr.eraseLine()
+    stderr.write("Model " & $j & " / " & $models.len & ": " & model_id)
     let native_values = calcValues(model, dosages)
     emitValues(model, dosages, 0, seed, n_afbins, native_values, output_file)
     for i in 1..iters:
@@ -240,7 +240,8 @@ proc calculationLoop(dosage_path: string, model_path: string, output_file: File,
       let null_values = calcValues(null_model, dosages)
       emitValues(model, dosages, i, seed, n_afbins, null_values, output_file)
 
-  stderr.write("\rDone.\n")
+  stderr.eraseLine()
+  stderr.write("Done.\n")
 
 
 proc printUsage(message: string = "") =
