@@ -1,7 +1,7 @@
 #!/usr/bin/env Rscript
 
 AUTHOR = "Mark Pinese <m.pinese@garvan.org.au>"
-VERSION = "0.0.1 (13 Nov 2017)"
+VERSION = "0.0.2 (18 Nov 2017)"
 
 
 suppressPackageStartupMessages(library(plyr))
@@ -170,7 +170,7 @@ library(docopt)
 sprintf('Convert EBI GWAS summary tables to POPSTAR PTS format.  Requries a connection to a UCSC-style MySQL DB.
 
 Usage:
-  ebi2pts.R [options] <associations> <ancestry> [output]
+  ebi2pts.R [options] <associations> <ancestry>
   ebi2pts.R -h
 
 Options: 
