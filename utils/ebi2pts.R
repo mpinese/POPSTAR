@@ -184,7 +184,12 @@ rebase_associations = function(assoc, dbsnp_tbl)
         as.data.frame(rebase_association(d$rsid, d$effect_allele, d$effect_allele_freq, d$log_beta, dbsnp_tbl)),
         .progress = "text")
 
-    offsets = dlply(rebased_assoc, .(id), function(d) sum(d$offset))
+    offsets = dlply(rebased_assoc, .(id), function(d) {
+        offset_sum = sum(d$offset, na.rm = TRUE)
+        if (is.na(offset_sum))
+            offset_sum = 0
+        offset_sum
+    })
     rebased_assoc = rebased_assoc[rebased_assoc$passes,]
 
     list(rebased = rebased_assoc[,c("id", "rsid", "chrom", "pos", "ref", "alt", "aaf", "log_beta")], offsets = offsets)
