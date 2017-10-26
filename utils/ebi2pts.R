@@ -1,13 +1,13 @@
 #!/usr/bin/env Rscript
 
 AUTHOR = "Mark Pinese <m.pinese@garvan.org.au>"
-VERSION = "0.0.2 (18 Nov 2017)"
-
+VERSION = "0.0.3 (26 Oct 2017)"
 
 suppressPackageStartupMessages(library(plyr))
+suppressPackageStartupMessages(library(RSQLite))
+suppressPackageStartupMessages(library(DBI))
 suppressPackageStartupMessages(library(dplyr))
 suppressPackageStartupMessages(library(dbplyr))
-suppressPackageStartupMessages(library(RMySQL))
 
 
 read_population_associations = function(assoc_file, ancestry_file, pop_regex = "european")
@@ -20,7 +20,7 @@ read_population_associations = function(assoc_file, ancestry_file, pop_regex = "
     count.popn.replication = daply(ancestry, .(STUDY.ACCCESSION), function(a) sum(a$NUMBER.OF.INDIVDUALS[a$STAGE == "replication" & grepl(pop_regex, tolower(a$BROAD.ANCESTRAL.CATEGORY))]))
 
     assoc = read.table(assoc_file, sep = "\t", header = TRUE, comment.char = "", quote = "", stringsAsFactors = FALSE)
-    assoc = assoc[,c("PUBMEDID", "STRONGEST.SNP.RISK.ALLELE", "PVALUE_MLOG", "P.VALUE..TEXT.", "OR.or.BETA", "MAPPED_TRAIT", "MAPPED_TRAIT_URI", "STUDY.ACCESSION")]
+    assoc = assoc[,c("PUBMEDID", "STRONGEST.SNP.RISK.ALLELE", "PVALUE_MLOG", "P.VALUE..TEXT.", "OR.or.BETA", "MAPPED_TRAIT", "MAPPED_TRAIT_URI", "STUDY.ACCESSION", "RISK.ALLELE.FREQUENCY")]
     assoc$pop = pop_regex
     assoc$pop.n.initial = count.popn.initial[assoc$STUDY.ACCESSION]
     assoc$pop.n.replication = count.popn.replication[assoc$STUDY.ACCESSION]
@@ -28,6 +28,8 @@ read_population_associations = function(assoc_file, ancestry_file, pop_regex = "
     # Calculate ln(Beta), discarding invalid values
     assoc$log_beta = log(assoc$OR.or.BETA)
     assoc = assoc[!(is.na(assoc$log_beta)) & is.finite(assoc$log_beta),,drop=FALSE]
+
+    assoc$RISK.ALLELE.FREQUENCY = as.numeric(assoc$RISK.ALLELE.FREQUENCY)
 
     # Discard non-SNP associations, or rows with incomplete data (missing at
     # least one of rsid, effect allele, or beta)
@@ -39,89 +41,153 @@ read_population_associations = function(assoc_file, ancestry_file, pop_regex = "
 
     assoc$id = paste(assoc$STUDY.ACCESSION, gsub(":", ";", assoc$MAPPED_TRAIT), gsub("^ *\\(", "", gsub(" *\\)$", "", assoc$P.VALUE..TEXT)), sep = ":")
 
-    assoc = assoc[,c("id", "STUDY.ACCESSION", "PUBMEDID", "MAPPED_TRAIT", "MAPPED_TRAIT_URI", "pop", "pop.n.initial", "pop.n.replication", "rsid", "effect_allele", "log_beta", "PVALUE_MLOG")]
-    colnames(assoc) = c(    "id", "accession",       "pubmed",   "trait",        "trait_uri",        "pop", "n.initial",     "n.replication",     "rsid", "effect_allele", "log_beta", "log10_p")
+    assoc = assoc[,c("id", "STUDY.ACCESSION", "PUBMEDID", "MAPPED_TRAIT", "MAPPED_TRAIT_URI", "pop", "pop.n.initial", "pop.n.replication", "rsid", "effect_allele", "RISK.ALLELE.FREQUENCY", "log_beta", "PVALUE_MLOG")]
+    colnames(assoc) = c(    "id", "accession",       "pubmed",   "trait",        "trait_uri",        "pop", "n.initial",     "n.replication",     "rsid", "effect_allele", "effect_allele_freq", "log_beta", "log10_p")
 
-    assoc
+    assoc[!duplicated(assoc),]
 }
 
 
-rebase_associations = function(assoc, dbname = "hg19", host = "genome-mysql.cse.ucsc.edu", user = "genome", snp_table = "snp147Common")
+get_snps_from_db = function(rsids, dbsnp_tbl)
 {
-    # Use the rsid and alternate allele information to rebase the scores on the
-    # reference sequence.  This may require inversion of the betas, and associated
-    # updating of an offset term for each polygenic score.
-    # 
-    # Note that this code uses a connection to a UCSC-style MySQL DB.
-    message(sprintf("%d rsIDs in input", length(unique(assoc$rsid))))
+    # Fetch dbSNP data for the rsids in assoc from a dbsnp-AF database
 
-    # Fetch dbSNP data for the rsids in assoc from a remote (eg UCSC) database.
-    ucsc = src_mysql(dbname = dbname, host = host, user = user)
-    ucsc.snps = tbl(ucsc, snp_table)
-    temp.rsids = unique(assoc$rsid)
-    ucsc.snps.matching_rsids = as.data.frame(select(filter(ucsc.snps, name %in% temp.rsids & locType == "exact"), 
-        chrom, chromEnd, name, refNCBI, strand, observed, alleles, alleleFreqs))
-    colnames(ucsc.snps.matching_rsids) = c("chrom", "pos", "rsid", "ref", "strand", "observed", "alleles", "alleleFreqs")
-    message(sprintf("%d rsIDs found in database", length(unique(ucsc.snps.matching_rsids$rsid))))
+    snps.matching_rsids = as.data.frame(select(filter(rsids, name %in% rsids), 
+        chrom, chromEnd, name, refNCBI, strand, observed, alleles))
+    colnames(snps.matching_rsids) = c("chrom", "pos", "ref", "alt", "rsid", "AC", "AN")
+    message(sprintf("%d rsIDs found in database", length(unique(snps.matching_rsids$rsid))))
 
     # Filter down to biallelic unambiguous strand SNPs.
-    ucsc.snps.matching_rsids = ucsc.snps.matching_rsids[ucsc.snps.matching_rsids$observed %in% c("A/C", "A/G", "C/T", "G/T"),,drop=FALSE]
-    message(sprintf("%d strand-specific SNPs", length(unique(ucsc.snps.matching_rsids$rsid))))
+    snps.matching_rsids = snps.matching_rsids[snps.matching_rsids$observed %in% c("A/C", "A/G", "C/T", "G/T"),,drop=FALSE]
+    message(sprintf("%d strand-specific SNPs", length(unique(snps.matching_rsids$rsid))))
 
     # Filter down to canonical chromosomes
-    ucsc.snps.matching_rsids$chrom = sub("^chr", "", ucsc.snps.matching_rsids$chrom)
-    ucsc.snps.matching_rsids = ucsc.snps.matching_rsids[grepl("^([0-9]+|X|Y)$", ucsc.snps.matching_rsids$chrom),,drop=FALSE]
-    message(sprintf("%d rsIDs in canonical chromosomes", length(unique(ucsc.snps.matching_rsids$rsid))))
+    snps.matching_rsids$chrom = sub("^chr", "", snps.matching_rsids$chrom)
+    snps.matching_rsids = snps.matching_rsids[grepl("^([0-9]+|X|Y)$", snps.matching_rsids$chrom),,drop=FALSE]
+    message(sprintf("%d rsIDs in canonical chromosomes", length(unique(snps.matching_rsids$rsid))))
 
-    # Extract alleles and allele frequencies
-    temp = t(simplify2array(strsplit(ucsc.snps.matching_rsids$alleles, ",")))
+    # Extract alleles
+    temp = t(simplify2array(strsplit(snps.matching_rsids$alleles, ",")))
     colnames(temp) = c("allele1", "allele2")
-    ucsc.snps.matching_rsids = cbind(ucsc.snps.matching_rsids, temp)
-    ucsc.snps.matching_rsids$allele1 = as.character(ucsc.snps.matching_rsids$allele1)
-    ucsc.snps.matching_rsids$allele2 = as.character(ucsc.snps.matching_rsids$allele2)
-    temp = t(simplify2array(strsplit(ucsc.snps.matching_rsids$alleleFreqs, ",")))
-    colnames(temp) = c("af1", "af2")
-    ucsc.snps.matching_rsids = cbind(ucsc.snps.matching_rsids, temp)
-    ucsc.snps.matching_rsids$af1 = as.numeric(as.character(ucsc.snps.matching_rsids$af1))
-    ucsc.snps.matching_rsids$af2 = as.numeric(as.character(ucsc.snps.matching_rsids$af2))
-    ucsc.snps.matching_rsids = ucsc.snps.matching_rsids[,!(colnames(ucsc.snps.matching_rsids) %in% c("alleles", "alleleFreqs"))]
-    stopifnot(max(abs(ucsc.snps.matching_rsids$af1 + ucsc.snps.matching_rsids$af2 - 1)) < 2e-6)
+    snps.matching_rsids = cbind(snps.matching_rsids, temp)
+    snps.matching_rsids$allele1 = as.character(snps.matching_rsids$allele1)
+    snps.matching_rsids$allele2 = as.character(snps.matching_rsids$allele2)
 
-    # Convert all alleles to the positive strand
-    COMPLEMENT = c("A" = "T", "C" = "G", "G" = "C", "T" = "A")
-    ucsc.snps.matching_rsids$allele1posstrand = ifelse(ucsc.snps.matching_rsids$strand == "+", ucsc.snps.matching_rsids$allele1, COMPLEMENT[ucsc.snps.matching_rsids$allele1])
-    ucsc.snps.matching_rsids$allele2posstrand = ifelse(ucsc.snps.matching_rsids$strand == "+", ucsc.snps.matching_rsids$allele2, COMPLEMENT[ucsc.snps.matching_rsids$allele2])
-    stopifnot(ucsc.snps.matching_rsids$allele1posstrand == ucsc.snps.matching_rsids$ref | ucsc.snps.matching_rsids$allele2posstrand == ucsc.snps.matching_rsids$ref)
+    snps.matching_rsids
+}
 
-    # Identify which allele is the "alternate" (ie not genomic reference).
-    # Store this allele in the alt field, and its frequency in the aaf field.
-    ucsc.snps.matching_rsids$alt = ifelse(ucsc.snps.matching_rsids$allele2posstrand == ucsc.snps.matching_rsids$ref, ucsc.snps.matching_rsids$allele1posstrand, ucsc.snps.matching_rsids$allele2posstrand)
-    ucsc.snps.matching_rsids$aaf = ifelse(ucsc.snps.matching_rsids$allele2posstrand == ucsc.snps.matching_rsids$ref, ucsc.snps.matching_rsids$af1, ucsc.snps.matching_rsids$af2)
-    ucsc.snps.matching_rsids = ucsc.snps.matching_rsids[,c("rsid", "strand", "chrom", "pos", "ref", "alt", "aaf")]
 
-    # Augment the association data with the dbSNP fields.  Note that 
-    # some rows may be lost (all = FALSE) if they did not have a matching
-    # rsid field in the filtered ucsc.snps.matching_rsids.
-    assoc = merge(assoc, ucsc.snps.matching_rsids, by = "rsid", all = FALSE)
-    message(sprintf("%d rsIDs following merge", length(unique(assoc$rsid))))
+is_valid_strand_specific_snp = function(allele1, allele2)
+{
+    (allele1 != allele2) && 
+    (allele1 %in% c("A", "C", "G", "T")) &&
+    (allele2 %in% c("A", "C", "G", "T")) &&
+    (
+        (allele1 == "A" && allele2 != "T") ||
+        (allele1 == "T" && allele2 != "A") ||
+        (allele1 == "C" && allele2 != "G") ||
+        (allele1 == "G" && allele2 != "C")
+    )
+}
 
-    # In most cases the effect allele is reported according to the SNP strand.  However, 
-    # in about 20% of studies it's reported according to the positive (ie reference) strand,
-    # regardless of the SNP orientation in dbSNP.  Therefore we really can't take much for
-    # granted when interpreting the effect_allele field, and need to robustly identify which 
-    # of the ref or alt alleles equals effect_allele, regardless of strand convention.
-    # Fortunately we subset to strand-unambiguous biallelic SNPs in the above, so this 
-    # conversion is possible.
-    assoc$effect_allele_pos = ifelse(assoc$effect_allele == assoc$ref | assoc$effect_allele == assoc$alt, assoc$effect_allele, COMPLEMENT[assoc$effect_allele])
 
-    # (Partially) verify that conversion worked
-    stopifnot(assoc$effect_allele_pos == assoc$ref | assoc$effect_allele_pos == assoc$alt)
+check_snp_against_db = function(target_rsid, effect_allele, dbsnp_tbl)
+{
+    dbsnp_matches = dbsnp_tbl %>% filter(rsid == target_rsid)
 
-    # Now we can finally rebase the associations to the reference.
-    assoc$logBeta = ifelse(assoc$effect_allele_pos == assoc$alt, assoc$log_beta, -assoc$log_beta)
-    offsets = daply(assoc, .(id), function(d) sum(d$log_beta[d$effect_allele_pos == d$ref]))
+    # Run a gauntlet of consistency checks.
 
-    list(rebased = assoc[,c("id", "rsid", "chrom", "pos", "ref", "alt", "aaf", "logBeta")], offsets = offsets)
+    # Fail on missing SNPs or multi-allelics
+    if (as.data.frame(count(dbsnp_matches))$n != 1)
+        return(list(passes = FALSE, chrom = NA, pos = NA, ref = NA, alt = NA, aaf = NA))
+
+    dbsnp_matches = as.data.frame(dbsnp_matches)
+
+    # Fail on ambiguous or invalid SNPs.
+    if (!is_valid_strand_specific_snp(dbsnp_matches$ref, dbsnp_matches$alt))
+        return(list(passes = FALSE, chrom = NA, pos = NA, ref = NA, alt = NA, aaf = NA))
+
+    # Fail on SNPs which don't have the effect allele
+    if (effect_allele != dbsnp_matches$ref && effect_allele != dbsnp_matches$alt)
+        return(list(passes = FALSE, chrom = NA, pos = NA, ref = NA, alt = NA, aaf = NA))
+
+    return(list(
+        passes = TRUE,
+        chrom = dbsnp_matches$chrom, pos = dbsnp_matches$pos, 
+        ref = dbsnp_matches$ref, alt = dbsnp_matches$alt, 
+        aaf = dbsnp_matches$AC / dbsnp_matches$AN))
+}
+
+
+rebase_association = function(target_rsid, effect_allele, effect_allele_freq, log_beta, dbsnp_tbl)
+{
+    # Run the SNP through a series of checks, and retrieve information on the SNP.
+    dbsnp_check_result = check_snp_against_db(target_rsid, effect_allele, dbsnp_tbl)
+
+    if (dbsnp_check_result$passes == TRUE)
+    {
+        # SNP passes checks.  Rebase to the reference if needed
+        if (effect_allele == dbsnp_check_result$ref)
+        {
+            # effect allele is the ref: rebasing required.
+            # The idea behind rebasing is that we have a predictor of the following form:
+            #    y = a1*x + a0
+            # and wish to express it in terms of x' = (2-x).  This necessitates a change
+            # to a1 and a0:
+            #    a1*x + a0 = a1'*(2-x) + a0'  for all x
+            # => a1*x + a0 - 2*a1' + x*a1' - a0' = 0
+            # => a1 = -a1'
+            # => a1*x + a0 + 2*a1 - a1*x - a0' = 0
+            # => a0 - a0' + 2*a1 = 0
+            # => a0' = 2*a1 + a0
+            # (Note the above is only valid for autosomes, due to the 2-x).
+            # (Further note that in this case a0 = 0, as the EBI GWAS database does not
+            # store offset terms.)
+            rebased.log_beta = -log_beta
+            rebased.offset = 2*log_beta
+        }
+        else
+        {
+            # effect allele is the alt: no rebasing required
+            rebased.log_beta = log_beta
+            rebased.offset = 0
+        }
+    }
+    else
+    {
+        # Failure.  We add a term to the offset to marginalise the missing SNP (this
+        # is a rough imputation).  Using the notation above:
+        #   y = a1*x + a0
+        # But we do not have x.  We substitute xhat = 2*EAF, where EAF is the effect
+        # allele frequency in the derivation cohort.  Again this is autosome-specific.
+        # Then, y = a1*xhat + a0 = a1*2*EAF + a0.
+        # We include the a1*2*EAF into a modified a0:
+        #   a0' = a0 + a1*2*EAF
+        # so that the missing variant is now rolled into the offset term.  Again a0
+        # is initially zero.
+        rebased.log_beta = 0
+        rebased.offset = log_beta*2*effect_allele_freq
+    }
+
+    # Update the result structure with the rebased values and return
+    dbsnp_check_result$log_beta = rebased.log_beta
+    dbsnp_check_result$offset = rebased.offset
+    return(dbsnp_check_result)
+}
+
+
+rebase_associations = function(assoc, dbsnp_tbl)
+{
+    message(sprintf("%d rsIDs in input", length(unique(assoc$rsid))))
+
+    rebased_assoc = ddply(assoc, colnames(assoc), function(d) 
+        as.data.frame(rebase_association(d$rsid, d$effect_allele, d$effect_allele_freq, d$log_beta, dbsnp_tbl)),
+        .progress = "text")
+
+    offsets = dlply(rebased_assoc, .(id), function(d) sum(d$offset))
+    rebased_assoc = rebased_assoc[rebased_assoc$passes,]
+
+    list(rebased = rebased_assoc[,c("id", "rsid", "chrom", "pos", "ref", "alt", "aaf", "log_beta")], offsets = offsets)
 }
 
 
@@ -142,35 +208,30 @@ drop_small_models = function(assoc, min.loci = 5)
 }
 
 
-estimate_score_variance = function(assoc)
-{
-    daply(assoc, .(id), function(a) sum(a$logBeta^2 * a$aaf*(1-a$aaf) * 2))
-}
-
-
 export_rebased_scores = function(assoc.rebased, output_path)
 {
     offsets = assoc.rebased$offsets
     coefficients = assoc.rebased$rebased
     coefficients$vid = paste(coefficients$chrom, coefficients$pos, coefficients$ref, coefficients$alt, sep = ":")
 
-    offset_df = data.frame(id = names(offsets), rsid = NA, chrom = NA, pos = NA, ref = NA, alt = NA, aaf = NA, logBeta = offsets, vid = "OFFSET")
+    offset_df = data.frame(id = names(offsets), rsid = NA, chrom = NA, pos = NA, ref = NA, alt = NA, aaf = NA, log_beta = unlist(offsets), vid = "OFFSET")
     offset_df = offset_df[offset_df$id %in% unique(coefficients$id),]
 
     augmented_coefficients = rbind(coefficients, offset_df)
     augmented_coefficients = augmented_coefficients[order(augmented_coefficients$id, augmented_coefficients$chrom, augmented_coefficients$pos),]
+    rownames(augmented_coefficients) = NULL
 
-    write.table(augmented_coefficients[,c("id", "vid", "rsid", "aaf", "logBeta")], output_path, sep = "\t", quote = FALSE, row.names = FALSE, col.names = TRUE)
+    write.table(augmented_coefficients[,c("id", "vid", "rsid", "aaf", "log_beta")], output_path, sep = "\t", quote = FALSE, row.names = FALSE, col.names = TRUE)
 }
 
 
 
 library(docopt)
 
-sprintf('Convert EBI GWAS summary tables to POPSTAR PTS format.  Requries a connection to a UCSC-style MySQL DB.
+sprintf('Convert EBI GWAS summary tables to POPSTAR PTS format.
 
 Usage:
-  ebi2pts.R [options] <associations> <ancestry>
+  ebi2pts.R [options] <associations> <ancestry> <database>
   ebi2pts.R -h
 
 Options: 
@@ -178,15 +239,12 @@ Options:
   -m <MIN_M>      Minimum number of loci in each PTS [default: 10]
   -b <POPN>       Target population regular expression [default: european]
   -o <OUT>        Path to output PTS file [default: /dev/stdout]
-  -host <DBHOST>  MySQL genome database host [default: genome-mysql.cse.ucsc.edu]
-  -db <DBNAME>    MySQL genome database name [default: hg19]
-  -user <DBUSER>  MySQL genome database user [default: genome]
-  -tbl <DBTABLE>  MySQL genome database table [default: snp147Common]
   -h              Print this help
 
 Arguments: 
   associations  Associations TSV from EBI GWAS Catalog (gwas_catalog_v1.0.1-associations_*)
   ancestry      Ancestry TSV from EBI GWAS Catalog (gwas_catalog-ancestry_*)
+  database      dbSNP and allele frequency SQLite database (gnomad.genomes.r2.0.1.sites.combined.split.minrep.NFE.dbSNP.autosomes.dba)
 
 %s
 %s
@@ -199,6 +257,9 @@ if (opts$h)
     print(doc)
     stop(0)
 }
+
+dbsnp_db_conn = DBI::dbConnect(RSQLite::SQLite(), dbname = opts$database, flags = SQLITE_RO)
+dbsnp_tbl = tbl(dbsnp_db_conn, "dbsnp")
 
 associations.raw = read_population_associations(opts$associations, opts$ancestry, opts$b)
 message(sprintf("Loaded %d polygenic scores, %d loci total", length(unique(associations.raw$id)), length(unique(associations.raw$rsid))))
@@ -214,9 +275,10 @@ if (as.integer(opts$m) > 1)
     associations.raw = drop_small_models(associations.raw, min.loci = as.integer(opts$m))
     message(sprintf("%d polygenic scores, %d loci total remain", length(unique(associations.raw$id)), length(unique(associations.raw$rsid))))
 }
+
 message("Rebasing associations... ")
-associations.rebased = rebase_associations(associations.raw, dbname = opts$db, host = opts$host, user = opts$user, snp_table = opts$tbl)
+associations.rebased = rebase_associations(associations.raw, dbsnp_tbl)
 if (as.integer(opts$m) > 1)
     associations.rebased$rebased = drop_small_models(associations.rebased$rebased, min.loci = as.integer(opts$m))
-message(sprintf("Done.  Final count: %d polygenic scores, %d loci total", length(unique(associations.raw$id)), length(unique(associations.raw$rsid))))
+message(sprintf("Done.  Final count: %d polygenic scores, %d loci total", length(unique(associations.rebased$rebased$id)), length(unique(associations.rebased$rebased$rsid))))
 export_rebased_scores(associations.rebased, opts$o)
