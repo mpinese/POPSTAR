@@ -1,6 +1,7 @@
 import math
 import memfiles
 import parseopt
+import parseutils
 import random
 import sets
 import sequtils
@@ -82,12 +83,16 @@ proc loadDosages(path: string, n_afbins=50): Dosages =
   stderr.write("  Reading...\n")
 
   # Read the data and verify vid uniqueness.
-  var 
+  var
     i = 0
     vid_set = initSet[string](sets.rightSize(nvariants))
     header_read = false
     buffer: TaintedString = ""
-  
+    vid: string
+    af: string
+    dosage: string
+    k: int
+
   for line in f.lines(buffer):
     if header_read == false:
       header_read = true
@@ -96,19 +101,21 @@ proc loadDosages(path: string, n_afbins=50): Dosages =
     if i %% 10000 == 0:
       stderr.eraseLine()
       stderr.write("    " & $i & " / " & $nvariants & " variants")
-    
-    let
-      fields = line.strip(leading=false).split(sep="\t")
-      vid = fields[0]
+
+    k = parseUntil(line, vid, {'\t'}, 0) + 1
+    k = k + skipUntil(line, {'\t'}, k) + 1
+    k = k + parseUntil(line, af, {'\t'}, k) + 1
+
     assert vid_set.containsOrIncl(vid) == false
     result.vid2idx[vid] = i
     result.vids[i] = vid
-    result.afs[i] = fields[2].parseFloat
+    result.afs[i] = af.parseFloat
     result.afbins[i] = min(n_afbins - 1, floor(result.afs[i] * n_afbins.float).int)
     result.afbin2idx[result.afbins[i]].add(i)
     let dosages_offset = i*nsamples
-    for j in 3..<fields.len:
-      result.dosages[dosages_offset + (j-3)] = fields[j].parseInt.int8
+    for j in 0..<nsamples:
+      k = k + parseUntil(line, dosage, {'\t', '\r'}, k) + 1
+      result.dosages[dosages_offset] = dosage.parseInt.int8
     i += 1
 
   # Check AF bin occupancy
