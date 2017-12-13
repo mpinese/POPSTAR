@@ -115,7 +115,7 @@ proc loadDosages(path: string, n_afbins=50): Dosages =
     let dosages_offset = i*nsamples
     for j in 0..<nsamples:
       k = k + parseUntil(line, dosage, {'\t', '\r'}, k) + 1
-      result.dosages[dosages_offset] = dosage.parseInt.int8
+      result.dosages[dosages_offset + j] = dosage.parseInt.int8
     i += 1
 
   # Check AF bin occupancy
