@@ -53,10 +53,11 @@ proc scanDosages(f: MemFile): tuple[samples: seq[string], nvariants:int] =
   for slice in f.memSlices:
     if header_read == false:
       header_read = true
-      samples = ($slice).strip(leading=false).split(sep="\t")[3..^1]
+      samples = ($slice).strip(leading=false).split(sep="\t")[1..^1]
       var sample_set = initSet[string](sets.rightSize(samples.len))
       for sample in result.samples:
-        assert sample_set.containsOrIncl(sample) == false
+        if sample_set.containsOrIncl(sample) == true:
+          raise newException(Exception, "Sample " & sample & " present more than once in dosages file")
     else:
       nvariants += 1
   result = (samples, nvariants)
@@ -105,23 +106,29 @@ proc loadDosages(path: string, n_afbins=50): Dosages =
       stderr.write("    " & $i & " / " & $nvariants & " variants")
     
     k = parseUntil(line, vid, {'\t'}, 0) + 1
-    k = k + skipUntil(line, {'\t'}, k) + 1
 
-    assert vid_set.containsOrIncl(vid) == false
+    if line.len - k < nsamples:
+      raise newException(Exception, "Insufficient genotypes for variant " & vid & ".  Expected " & $nsamples & ", found at most " & $(line.len - k))
+
+    if vid_set.containsOrIncl(vid) == true:
+      raise newException(Exception, "Variant " & vid & " present more than once in dosages file")
     result.vid2idx[vid] = i
     result.vids[i] = vid
 
     let dosages_offset = i*nsamples
     nmissing = 0
+    nalt = 0
     for j in 0..<nsamples:
       dosage = line[k+j]
+      if not (dosage == '-' or dosage == '0' or dosage == '1' or dosage == '2'):
+        raise newException(Exception, "Invalid dosage value " & $dosage & " found in dosage file, variant " & vid & " sample " & result.samples[j])
       if dosage == '-':
         result.dosages[dosages_offset + j] = -1
         nmissing += 1
       else:
         let dosage_int = ($dosage).parseInt.int8
-        nalt += dosage_int
         result.dosages[dosages_offset + j] = dosage_int
+        nalt += dosage_int
 
     result.afs[i] = nalt.float / (2*(nsamples - nmissing)).float
     result.afbins[i] = min(n_afbins - 1, floor(result.afs[i] * n_afbins.float).int)
@@ -157,14 +164,13 @@ proc loadModels(path: string, n_afbins: int, dosages: Dosages): Models =
       afbin = min(n_afbins - 1, floor(af * n_afbins.float).int)
       dosages_af = if dosages.vid2idx.hasKey(vid): dosages.afs[dosages.vid2idx[vid]] else: af
     if af - dosages_af > 0.05 or af - dosages_af < -0.05:
-      stderr.write("  AF mismatch for vid " & vid & ": Dosages " & $dosages_af & ", Model " & $af & "\n")
-      continue
+      stderr.write("\n  " & model_id & " AF mismatch for vid " & vid & ": Dosages " & $dosages_af & ", Model " & $af)
     if not result.hasKey(model_id):
       result[model_id] = (id:model_id, offset:0.0, coefs:initTable[string, VarCoef]())
 
     result[model_id].coefs[vid] = (af:af, afbin:afbin, coef:coef)
 
-  stderr.write("  Loaded " & $result.len & " models\n")
+  stderr.write("\n  Loaded " & $result.len & " models\n")
 
 
 proc calcValues(model: Model, dosages: Dosages, af_source: SamplingReference): seq[float] = 
@@ -355,7 +361,7 @@ proc main() =
       else:
         printUsage("ERROR: unrecognised option " & key)
         return
-    else: assert false
+    else: raise newException(Exception, "Unexpected kind " & $kind & " returned by getopt -- please report this error")
 
   if dosage_path == nil:
     printUsage("ERROR: Dosage file path is required.")
