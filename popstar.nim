@@ -9,19 +9,15 @@ import strutils
 import tables
 import terminal
 
-const VERSION = "0.0.2, 12 Oct 2017"
+const VERSION = "0.0.3, 19 Dec 2017"
 const AUTHOR = "Mark Pinese <m.pinese@garvan.org.au>"
 
-
-# TODO: Add warning somewhere for AF mismatch
-# TODO: Special rules for resampling:
-#   * Sampling should stay within xsome "class" (classes: X, Y, MT, autosomes)
-#   * Two choices of AF: dosages (empirical) or model
+# TODO:
+#   * Deal better with largely missing loci
 #   * Special treatment of missing loci (in model but not in dosages).  
 #     These should *not* be resampled, but rather removed and added to offset.
 #     One hacky way to achieve this is to change the missing locus ID to an
 #     ID which is definitely not in the dosages data.
-#   * Try and do it without replacement
 
 
 type
@@ -41,6 +37,11 @@ type
     coefs: Table[string, VarCoef]   # Keyed by vid
   ]
   Models = Table[string, Model]     # Keyed by id
+  SummaryStatistics = array[4, float]
+  SamplingReference {.pure.} = enum
+    Internal, External
+  OutputFormat {.pure.} = enum
+    Complete, Summary
 
 
 proc scanDosages(f: MemFile): tuple[samples: seq[string], nvariants:int] = 
@@ -83,16 +84,17 @@ proc loadDosages(path: string, n_afbins=50): Dosages =
   stderr.write("  Reading...\n")
 
   # Read the data and verify vid uniqueness.
-  var
+  var 
     i = 0
     vid_set = initSet[string](sets.rightSize(nvariants))
     header_read = false
     buffer: TaintedString = ""
     vid: string
-    af: string
-    dosage: string
+    dosage: char
     k: int
-
+    nmissing: int
+    nalt: int
+  
   for line in f.lines(buffer):
     if header_read == false:
       header_read = true
@@ -101,21 +103,29 @@ proc loadDosages(path: string, n_afbins=50): Dosages =
     if i %% 10000 == 0:
       stderr.eraseLine()
       stderr.write("    " & $i & " / " & $nvariants & " variants")
-
+    
     k = parseUntil(line, vid, {'\t'}, 0) + 1
     k = k + skipUntil(line, {'\t'}, k) + 1
-    k = k + parseUntil(line, af, {'\t'}, k) + 1
 
     assert vid_set.containsOrIncl(vid) == false
     result.vid2idx[vid] = i
     result.vids[i] = vid
-    result.afs[i] = af.parseFloat
+
+    let dosages_offset = i*nsamples
+    nmissing = 0
+    for j in 0..<nsamples:
+      dosage = line[k+j]
+      if dosage == '-':
+        result.dosages[dosages_offset + j] = -1
+        nmissing += 1
+      else:
+        let dosage_int = ($dosage).parseInt.int8
+        nalt += dosage_int
+        result.dosages[dosages_offset + j] = dosage_int
+
+    result.afs[i] = nalt.float / (2*(nsamples - nmissing)).float
     result.afbins[i] = min(n_afbins - 1, floor(result.afs[i] * n_afbins.float).int)
     result.afbin2idx[result.afbins[i]].add(i)
-    let dosages_offset = i*nsamples
-    for j in 0..<nsamples:
-      k = k + parseUntil(line, dosage, {'\t', '\r'}, k) + 1
-      result.dosages[dosages_offset + j] = dosage.parseInt.int8
     i += 1
 
   # Check AF bin occupancy
@@ -126,7 +136,7 @@ proc loadDosages(path: string, n_afbins=50): Dosages =
   stderr.write("\n  Loaded " & $nvariants & " variants x " & $nsamples & " samples, smallest AF bin size: " & $min_occupancy & "\n")
 
 
-proc loadModels(path: string, n_afbins: int): Models = 
+proc loadModels(path: string, n_afbins: int, dosages: Dosages): Models = 
   stderr.write("Loading models from " & path & ", " & $n_afbins & " AF bins...")
   result = initTable[string, Model]()
   let f = system.open(path, mode=fmRead)
@@ -136,7 +146,7 @@ proc loadModels(path: string, n_afbins: int): Models =
       fields = line.strip(leading=false).split(sep="\t")
       model_id = fields[0]
       vid = fields[1]
-      coef = fields[4].parseFloat
+      coef = if fields[4] == "NA": 0.0 else: fields[4].parseFloat
 
     if vid == "OFFSET":
       result[model_id].offset = coef
@@ -145,6 +155,10 @@ proc loadModels(path: string, n_afbins: int): Models =
     let
       af = fields[3].parseFloat
       afbin = min(n_afbins - 1, floor(af * n_afbins.float).int)
+      dosages_af = if dosages.vid2idx.hasKey(vid): dosages.afs[dosages.vid2idx[vid]] else: af
+    if af - dosages_af > 0.05 or af - dosages_af < -0.05:
+      stderr.write("  AF mismatch for vid " & vid & ": Dosages " & $dosages_af & ", Model " & $af & "\n")
+      continue
     if not result.hasKey(model_id):
       result[model_id] = (id:model_id, offset:0.0, coefs:initTable[string, VarCoef]())
 
@@ -153,7 +167,7 @@ proc loadModels(path: string, n_afbins: int): Models =
   stderr.write("  Loaded " & $result.len & " models\n")
 
 
-proc calcValues(model: Model, dosages: Dosages): seq[float] = 
+proc calcValues(model: Model, dosages: Dosages, af_source: SamplingReference): seq[float] = 
   let n_samples = dosages.samples.len
   result = newSeq[float](n_samples)
 
@@ -165,11 +179,10 @@ proc calcValues(model: Model, dosages: Dosages): seq[float] =
       let dosages_offset = dosages.vid2idx[vid]*n_samples
       for i in 0..<n_samples:
         if dosages.dosages[dosages_offset + i] == -1:
-          # TODO: Can choose coef.af or dosages.afs here -- population bias vs genotype sampling bias.  GTS bias basically informative missingness.
-          # coef.af solution (population bias):
-          # result[i] += 2.0*coef.af*coef.coef
-          # dosages.afs solution (informative missingness issues):
-          result[i] += 2.0*dosages.afs[dosages.vid2idx[vid]]*coef.coef
+          if af_source == SamplingReference.Internal:
+            result[i] += 2.0*dosages.afs[dosages.vid2idx[vid]]*coef.coef
+          else:  # af_source == SamplingReference.External:
+            result[i] += 2.0*coef.af*coef.coef
         else:
           result[i] += float(dosages.dosages[dosages_offset + i])*coef.coef
     else:
@@ -180,7 +193,7 @@ proc calcValues(model: Model, dosages: Dosages): seq[float] =
         result[i] += 2.0*coef.af*coef.coef
 
 
-proc generateNullModel(model: Model, dosages: Dosages, seed: int): Model = 
+proc generateNullModel(model: Model, dosages: Dosages, af_source: SamplingReference, seed: int): Model = 
   randomize(seed)
 
   result.id = model.id
@@ -190,22 +203,19 @@ proc generateNullModel(model: Model, dosages: Dosages, seed: int): Model =
   for vid, coef in model.coefs.pairs:
     if dosages.vid2idx.hasKey(vid):
       # Select a new variant from dosages with matching allele frequency
-      # Alternative code for first line: afbin = coef.afbin
+      let afbin = 
+        if af_source == SamplingReference.Internal:
+          dosages.afbins[dosages.vid2idx[vid]]
+        else:  # af_source = SamplingReference.External
+          coef.afbin
 
       # Note: sampling with replacement.  Shouldn't matter in almost all cases.
       # TODO: Ideally should not select variants in LD.  Difficult to implement though.
       # One rough approach could be to enforce a minimum distance.
       # This sampling with replacement *will* be an issue for WGP.
-
-      # TODO: Consider sampling only within xsomes.
       let
-        afbin = dosages.afbins[dosages.vid2idx[vid]]
         new_vid_idx = dosages.afbin2idx[afbin][random(dosages.afbin2idx[afbin].len)]
         new_vid = dosages.vids[new_vid_idx]
-      # TODO: Add random sign flipping -- good idea?  Consider the implicit bias that's
-      # introduced by the "not reference" coding of the dosages.  Though OTOH this
-      # should also be accompanied by AF flipping... in which case will the effect be
-      # the same?  Think on this.
       result.coefs[new_vid] = (af:dosages.afs[new_vid_idx], afbin:afbin, coef:coef.coef)
     else:
       # This locus was absent from dosages, so its null equivalent should
@@ -213,18 +223,46 @@ proc generateNullModel(model: Model, dosages: Dosages, seed: int): Model =
       discard
 
 
-proc emitHeader(destination: File) = 
-  destination.write("model\tsample\titer\tseed\tnafbins\tvalue\n")
+proc calcSummaryStatistics(values: seq[float]): SummaryStatistics = 
+  result = [0.0, 0.0, 0.0, 0.0]
 
-
-proc emitValues(model: Model, dosages: Dosages, iter: int, seed: int, n_afbins: int, values: seq[float], destination: File) = 
   for i in 0..<values.len:
-    destination.write(model.id & "\t" & dosages.samples[i] & "\t" & $iter & "\t" & $seed & "\t" & $n_afbins & "\t" & $values[i] & "\n")
+    result[0] += values[i]
+  result[0] /= values.len.float
+
+  for i in 0..<values.len:
+    result[1] += (values[i] - result[0])^2
+  result[1] /= values.len.float
+  let sigma = sqrt(result[1])
+  
+  for i in 0..<values.len:
+    let stdx = (values[i] - result[0]) / sigma
+    result[2] += stdx^3
+    result[3] += stdx^4
+  result[2] /= values.len.float
+  result[3] /= values.len.float
 
 
-proc calculationLoop(dosage_path: string, model_path: string, output_file: File, iters: int, n_afbins: int, seed: int) = 
-  let models = loadModels(model_path, n_afbins)
+proc emitHeader(destination: File, output_format: OutputFormat) = 
+  if output_format == OutputFormat.Complete:
+    destination.write("model\tsample\titer\tseed\tnafbins\texternal_ref_af\tvalue\n")
+  else:
+    destination.write("model\titer\tseed\tnafbins\texternal_ref_af\tm1\tm2\tm3\tm4\n")
+
+
+proc emitValues(model: Model, dosages: Dosages, iter: int, seed: int, n_afbins: int, values: seq[float], output_format: OutputFormat, af_source: SamplingReference, destination: File) = 
+  let ext_ref_af = if af_source == SamplingReference.External: '1' else: '0'
+  if output_format == OutputFormat.Complete:
+    for i in 0..<values.len:
+      destination.write(model.id & "\t" & dosages.samples[i] & "\t" & $iter & "\t" & $seed & "\t" & $n_afbins & "\t" & ext_ref_af & "\t" & $values[i] & "\n")
+  else:
+    let summary = calcSummaryStatistics(values)
+    destination.write(model.id & "\t" & $iter & "\t" & $seed & "\t" & $n_afbins & "\t" & ext_ref_af & "\t" & $summary[0] & "\t" & $summary[1] & "\t" & $summary[2] & "\t" & $summary[3] & "\n")
+
+
+proc calculationLoop(dosage_path: string, model_path: string, output_file: File, output_format: OutputFormat, af_source: SamplingReference, iters: int, n_afbins: int, seed: int) = 
   let dosages = loadDosages(dosage_path, n_afbins)
+  let models = loadModels(model_path, n_afbins, dosages)
 
   stderr.write("Preparing random seed vector...\n")
   randomize(seed)
@@ -233,19 +271,19 @@ proc calculationLoop(dosage_path: string, model_path: string, output_file: File,
     subseeds.add(random(int.high))
 
   stderr.write("Writing output...\n")
-  emitHeader(output_file)
+  emitHeader(output_file, output_format)
 
   var j = 0
   for model_id, model in models.pairs:
     j += 1
     stderr.eraseLine()
     stderr.write("Model " & $j & " / " & $models.len & ": " & model_id)
-    let native_values = calcValues(model, dosages)
-    emitValues(model, dosages, 0, seed, n_afbins, native_values, output_file)
+    let native_values = calcValues(model, dosages, af_source)
+    emitValues(model, dosages, 0, seed, n_afbins, native_values, output_format, af_source, output_file)
     for i in 1..iters:
-      let null_model = generateNullModel(model, dosages, subseeds[i-1])
-      let null_values = calcValues(null_model, dosages)
-      emitValues(model, dosages, i, seed, n_afbins, null_values, output_file)
+      let null_model = generateNullModel(model, dosages, af_source, subseeds[i-1])
+      let null_values = calcValues(null_model, dosages, af_source)
+      emitValues(model, dosages, i, seed, n_afbins, null_values, output_format, af_source, output_file)
 
   stderr.eraseLine()
   stderr.write("Done.\n")
@@ -265,9 +303,11 @@ Required parameters:
 
 Options:
   --out|o=OUT     Path to the output file [default: stdout]
+  --format|f=FMT  Output format (complete or summary) [default: complete]
   --iter|i=ITER   Number of resampled null iterations to calculate [default: 1000]
-  --bins|b=BINS   Number of allele frequency bins for null allele matching [default: 50]
-  --seed|r=SEED   PRNG seed [default: 314159265]
+  --ref|r=REF     Source of resampling target allele frequency (external or internal) [default: external]
+  --bins|b=BINS   Number of allele frequency bins for null allele matching [default: 100]
+  --seed|s=SEED   PRNG seed [default: 314159265]
 
 v""" & VERSION & "\n" & AUTHOR & "\n\n")
 
@@ -279,7 +319,9 @@ proc main() =
     output_path: string = nil
     seed: int = 314159265
     iters: int = 1000
-    bins: int = 50
+    bins: int = 100
+    af_source: SamplingReference = SamplingReference.External
+    output_format: OutputFormat = OutputFormat.Complete
 
   for kind, key, val in getopt():
     case kind
@@ -288,17 +330,32 @@ proc main() =
       return
     of cmdLongOption, cmdShortOption:
       case key
+      of "bins", "b": bins = val.parseInt
       of "dosages", "d": dosage_path = val
+      of "format", "f":
+        if val == "complete":
+          output_format = OutputFormat.Complete
+        elif val == "summary":
+          output_format = OutputFormat.Summary
+        else:
+          printUsage("ERROR: parameter to --format|f must be either \"complete\" or \"summary\" (without quotes); was supplied: \"" & val & "\"")
+          return
+      of "iter", "i": iters = val.parseInt
       of "models", "m": model_path = val
       of "out", "o": output_path = val
-      of "seed", "r": seed = val.parseInt
-      of "iter", "i": iters = val.parseInt
-      of "bins", "b": bins = val.parseInt
+      of "ref", "r":
+        if val == "external":
+          af_source = SamplingReference.External
+        elif val == "internal":
+          af_source = SamplingReference.Internal
+        else:
+          printUsage("ERROR: parameter to --ref|r must be either \"external\" or \"internal\" (without quotes); was supplied: \"" & val & "\"")
+          return
+      of "seed", "s": seed = val.parseInt
       else:
         printUsage("ERROR: unrecognised option " & key)
         return
     else: assert false
-
 
   if dosage_path == nil:
     printUsage("ERROR: Dosage file path is required.")
@@ -310,7 +367,7 @@ proc main() =
 
   let output_file = if output_path == nil: stdout else: system.open(output_path, fmWrite)
 
-  calculationLoop(dosage_path, model_path, output_file, iters, bins, seed)
+  calculationLoop(dosage_path, model_path, output_file, output_format, af_source, iters, bins, seed)
 
 
 main()
