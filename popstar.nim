@@ -173,7 +173,7 @@ proc loadModels(path: string, n_afbins: int, dosages: Dosages): Models =
   stderr.write("\n  Loaded " & $result.len & " models\n")
 
 
-proc calcValues(model: Model, dosages: Dosages, af_source: SamplingReference): seq[float] = 
+proc calcValues(model: Model, dosages: Dosages): seq[float] = 
   let n_samples = dosages.samples.len
   result = newSeq[float](n_samples)
 
@@ -185,10 +185,7 @@ proc calcValues(model: Model, dosages: Dosages, af_source: SamplingReference): s
       let dosages_offset = dosages.vid2idx[vid]*n_samples
       for i in 0..<n_samples:
         if dosages.dosages[dosages_offset + i] == -1:
-          if af_source == SamplingReference.Internal:
-            result[i] += 2.0*dosages.afs[dosages.vid2idx[vid]]*coef.coef
-          else:  # af_source == SamplingReference.External:
-            result[i] += 2.0*coef.af*coef.coef
+          result[i] += 2.0*dosages.afs[dosages.vid2idx[vid]]*coef.coef
         else:
           result[i] += float(dosages.dosages[dosages_offset + i])*coef.coef
     else:
@@ -284,11 +281,11 @@ proc calculationLoop(dosage_path: string, model_path: string, output_file: File,
     j += 1
     stderr.eraseLine()
     stderr.write("Model " & $j & " / " & $models.len & ": " & model_id)
-    let native_values = calcValues(model, dosages, af_source)
+    let native_values = calcValues(model, dosages)
     emitValues(model, dosages, 0, seed, n_afbins, native_values, output_format, af_source, output_file)
     for i in 1..iters:
       let null_model = generateNullModel(model, dosages, af_source, subseeds[i-1])
-      let null_values = calcValues(null_model, dosages, af_source)
+      let null_values = calcValues(null_model, dosages)
       emitValues(model, dosages, i, seed, n_afbins, null_values, output_format, af_source, output_file)
 
   stderr.eraseLine()
