@@ -112,8 +112,6 @@ proc loadDosages(path: string, n_afbins=50): Dosages =
 
     if vid_set.containsOrIncl(vid) == true:
       raise newException(Exception, "Variant " & vid & " present more than once in dosages file")
-    result.vid2idx[vid] = i
-    result.vids[i] = vid
 
     let dosages_offset = i*nsamples
     nmissing = 0
@@ -130,9 +128,22 @@ proc loadDosages(path: string, n_afbins=50): Dosages =
         result.dosages[dosages_offset + j] = dosage_int
         nalt += dosage_int
 
-    result.afs[i] = nalt.float / (2*(nsamples - nmissing)).float
-    result.afbins[i] = min(n_afbins - 1, floor(result.afs[i] * n_afbins.float).int)
-    result.afbin2idx[result.afbins[i]].add(i)
+    if nmissing.float / nsamples.float > 0.01:
+      stderr.write("    Too many genotypes missing for variant " & vid & ", discarding")
+      # Simulate a variant discard by setting vid to "" (disallowed in loadModels), and
+      # not adding this variant to the AF bin array.  The variant will then not be 
+      # used for score calculation (vid == ""), or be included in resampled null models
+      # (not in AF bins).
+      vid = ""
+      result.afs[i] = NaN
+      result.afbins[i] = -1
+    else:
+      # Add the variant to all data structures.
+      result.vid2idx[vid] = i
+      result.afs[i] = nalt.float / (2*(nsamples - nmissing)).float
+      result.afbins[i] = min(n_afbins - 1, floor(result.afs[i] * n_afbins.float).int)
+      result.afbin2idx[result.afbins[i]].add(i)
+    result.vids[i] = vid
     i += 1
 
   # Check AF bin occupancy
@@ -158,6 +169,9 @@ proc loadModels(path: string, n_afbins: int, dosages: Dosages): Models =
     if vid == "OFFSET":
       result[model_id].offset = coef
       continue
+
+    if vid == "":
+      raise newException(Exception, "Invalid missing variant id encountered.")
 
     let
       af = fields[3].parseFloat
