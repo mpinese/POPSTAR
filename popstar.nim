@@ -226,7 +226,7 @@ proc generateNullModel(model: Model, dosages: Dosages, af_source: SamplingRefere
     else:
       # This locus was absent from dosages, so its null equivalent should
       # be missing too.  Easily done by leaving it alone.
-      discard
+      result.coefs[vid] = coef
 
 
 proc calcSummaryStatistics(values: seq[float]): SummaryStatistics = 
