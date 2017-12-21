@@ -95,6 +95,7 @@ proc loadDosages(path: string, n_afbins=50): Dosages =
     k: int
     nmissing: int
     nalt: int
+    ndiscarded = 0
   
   for line in f.lines(buffer):
     if header_read == false:
@@ -129,7 +130,7 @@ proc loadDosages(path: string, n_afbins=50): Dosages =
         nalt += dosage_int
 
     if nmissing.float / nsamples.float > 0.01:
-      stderr.write("    Too many genotypes missing for variant " & vid & ", discarding")
+      # stderr.write("    Too many genotypes missing for variant " & vid & ", discarding\n")
       # Simulate a variant discard by setting vid to "" (disallowed in loadModels), and
       # not adding this variant to the AF bin array.  The variant will then not be 
       # used for score calculation (vid == ""), or be included in resampled null models
@@ -137,6 +138,7 @@ proc loadDosages(path: string, n_afbins=50): Dosages =
       vid = ""
       result.afs[i] = NaN
       result.afbins[i] = -1
+      ndiscarded += 1
     else:
       # Add the variant to all data structures.
       result.vid2idx[vid] = i
@@ -151,7 +153,7 @@ proc loadDosages(path: string, n_afbins=50): Dosages =
   for i in 1..<n_afbins:
     min_occupancy = min(min_occupancy, result.afbin2idx[i].len)
 
-  stderr.write("\n  Loaded " & $nvariants & " variants x " & $nsamples & " samples, smallest AF bin size: " & $min_occupancy & "\n")
+  stderr.write("\n  Loaded " & $(nvariants - ndiscarded) & " variants x " & $nsamples & " samples, smallest AF bin size: " & $min_occupancy & "; " & $ndiscarded & " variants discarded.\n")
 
 
 proc loadModels(path: string, n_afbins: int, dosages: Dosages): Models = 
