@@ -9,7 +9,7 @@ import strutils
 import tables
 import terminal
 
-const VERSION = "0.0.3, 19 Dec 2017"
+const VERSION = "0.0.4, 10 Mar 2018"
 const AUTHOR = "Mark Pinese <m.pinese@garvan.org.au>"
 
 # TODO:
@@ -119,9 +119,9 @@ proc loadDosages(path: string, n_afbins=50): Dosages =
     nalt = 0
     for j in 0..<nsamples:
       dosage = line[k+j]
-      if not (dosage == '-' or dosage == '0' or dosage == '1' or dosage == '2'):
+      if not (dosage == '.' or dosage == '0' or dosage == '1' or dosage == '2'):
         raise newException(Exception, "Invalid dosage value " & $dosage & " found in dosage file, variant " & vid & " sample " & result.samples[j])
-      if dosage == '-':
+      if dosage == '.':
         result.dosages[dosages_offset + j] = -1
         nmissing += 1
       else:
