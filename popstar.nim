@@ -9,15 +9,8 @@ import strutils
 import tables
 import terminal
 
-const VERSION = "0.0.4, 10 Mar 2018"
+const VERSION = "0.0.4, 13 Mar 2018"
 const AUTHOR = "Mark Pinese <m.pinese@garvan.org.au>"
-
-# TODO:
-#   * Deal better with largely missing loci
-#   * Special treatment of missing loci (in model but not in dosages).  
-#     These should *not* be resampled, but rather removed and added to offset.
-#     One hacky way to achieve this is to change the missing locus ID to an
-#     ID which is definitely not in the dosages data.
 
 
 type
@@ -125,7 +118,7 @@ proc loadDosages(path: string, n_afbins=50): Dosages =
         result.dosages[dosages_offset + j] = -1
         nmissing += 1
       else:
-        let dosage_int = ($dosage).parseInt.int8
+        let dosage_int = int8(ord(dosage) - ord('0'))
         result.dosages[dosages_offset + j] = dosage_int
         nalt += dosage_int
 
@@ -166,7 +159,7 @@ proc loadModels(path: string, n_afbins: int, dosages: Dosages): Models =
       fields = line.strip(leading=false).split(sep="\t")
       model_id = fields[0]
       vid = fields[1]
-      coef = if fields[4] == "NA": 0.0 else: fields[4].parseFloat
+      coef = if fields[3] == "NA": 0.0 else: fields[3].parseFloat
 
     if vid == "OFFSET":
       result[model_id].offset = coef
@@ -176,7 +169,7 @@ proc loadModels(path: string, n_afbins: int, dosages: Dosages): Models =
       raise newException(Exception, "Invalid missing variant id encountered.")
 
     let
-      af = fields[3].parseFloat
+      af = fields[2].parseFloat
       afbin = min(n_afbins - 1, floor(af * n_afbins.float).int)
       dosages_af = if dosages.vid2idx.hasKey(vid): dosages.afs[dosages.vid2idx[vid]] else: af
     if af - dosages_af > 0.05 or af - dosages_af < -0.05:
@@ -201,14 +194,21 @@ proc calcValues(model: Model, dosages: Dosages): seq[float] =
       let dosages_offset = dosages.vid2idx[vid]*n_samples
       for i in 0..<n_samples:
         if dosages.dosages[dosages_offset + i] == -1:
+          # Missing genotype for this variant:sample.
+          # Impute with empirical allele dosage based on samples with non-missing genotypes.
+          # Variant allele frequency is dosages.afs[dosages.vid2idx[vid]]
           result[i] += 2.0*dosages.afs[dosages.vid2idx[vid]]*coef.coef
         else:
+          # Genotype available for this variant:sample.
+          # Variant allele dosage is dosages.dosages[dosages_offset + i]
           result[i] += float(dosages.dosages[dosages_offset + i])*coef.coef
     else:
+      # Variant is missing from the dosages.  Impute with the model-reported
+      # allele frequency (can't use empirical frequency from dosages as the
+      # variant's not present).  The effect will be an equal translation of
+      # the score for all individuals, so relative differences will be 
+      # preserved.
       for i in 0..<n_samples:
-        # Note use of coef.af here -- no recourse to population freq
-        # because none is available.  Effect will be translation across
-        # all individuals, so relative differences will be preserved.
         result[i] += 2.0*coef.af*coef.coef
 
 
@@ -221,7 +221,20 @@ proc generateNullModel(model: Model, dosages: Dosages, af_source: SamplingRefere
 
   for vid, coef in model.coefs.pairs:
     if dosages.vid2idx.hasKey(vid):
-      # Select a new variant from dosages with matching allele frequency
+      # Select a new variant from dosages with matching allele frequency.
+      # There are two choices for target AF:
+      #   - empirical AF in the dosages (SamplingReference.Internal)
+      #   - AF as reported in the model (SamplingReference.External)
+      # 
+      # The first case behaves similarly to a permutation test, and 
+      # effectively tests for a difference in score distribution shape between
+      # the true scores and the resampled.  Essentially, are the true
+      # scores more/less dispersed than expected by chance?  Mean shifts
+      # will not be tested.
+      #
+      # The second case tests for mean shift caused by AF differences
+      # between the dosages file and the AFs reported in the model file,
+      # as well as potentially distribution shape differences.
       let afbin = 
         if af_source == SamplingReference.Internal:
           dosages.afbins[dosages.vid2idx[vid]]
